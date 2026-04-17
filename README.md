@@ -253,3 +253,111 @@ echo "Infrastructure LXD déployée avec succès !"
 chmod +x deploy_lxd.sh
 ./deploy_lxd.sh
 ```
+<br>
+
+## **Sécurité des conteneurs avec iptables**
+
+### **Script `secure_container.sh`**
+
+```bash
+#!/bin/bash
+
+# Usage: ./secure_container.sh nom_projet port_web
+if ["\$#" -ne 2 ];then
+    echo "Usage:\$0 nom_projet port_web"
+    exit 1
+fi
+
+NOM_PROJET="\$1"
+PORT_WEB="$2"
+CONTAINER_APACHE="${NOM_PROJET}-apache-lxd"
+
+# Vérifier que le conteneur existe
+if ! lxc list | grep -q "\$CONTAINER_APACHE";then
+    echo "Erreur : Le conteneur\$CONTAINER_APACHE n'existe pas."
+    exit 1
+fi
+
+# Configurer iptables
+echo "Configuration du pare-feu pour\$CONTAINER_APACHE (port\$PORT_WEB)..."
+lxc exec \$CONTAINER_APACHE -- iptables -F
+lxc exec \$CONTAINER_APACHE -- iptables -X
+lxc exec \$CONTAINER_APACHE -- iptables -P INPUT DROP
+lxc exec \$CONTAINER_APACHE -- iptables -A INPUT -i lo -j ACCEPT
+lxc exec \$CONTAINER_APACHE -- iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+lxc exec \$CONTAINER_APACHE -- iptables -A INPUT -p tcp --dport \$PORT_WEB -j ACCEPT
+lxc exec \$CONTAINER_APACHE -- iptables -A INPUT -p icmp -j ACCEPT
+
+echo "Pare-feu configuré ! Seules les connexions sur le port\$PORT_WEB et ICMP sont autorisées."
+```
+
+### **Utilisation**
+
+```bash
+chmod +x secure_container.sh
+./secure_container.sh projet1 80
+```
+
+### **Règles appliquées**
+
+| Règle | Description |
+| --- | --- |
+| `INPUT DROP` | Bloque tout par défaut. |
+| `ACCEPT lo` | Autorise le trafic local. |
+| `ACCEPT ESTABLISHED` | Autorise les connexions déjà établies. |
+| `ACCEPT tcp/$PORT_WEB` | Autorise uniquement le port web. |
+| `ACCEPT icmp` | Autorise le ping. |
+
+---
+
+## **Tests de validation**
+
+### **1. Vérifier les conteneurs LXD**
+
+```bash
+lxc list
+```
+
+**Résultat attendu** :
+
+```text
+
++---------------------+---------+----------------------+-----------+
+|        NAME         |  STATE  |         IPV4         |   TYPE    |
++---------------------+---------+----------------------+-----------+
+| projet1-apache-lxd  | RUNNING | 10.113.43.222        | CONTAINER |
+| projet1-mariadb-lxd | RUNNING | 10.113.43.217        | CONTAINER |
++---------------------+---------+----------------------+-----------+
+```
+
+### **2. Vérifier le pare-feu**
+
+```bash
+lxc exec projet1-apache-lxd -- iptables -L -n
+```
+
+**Résultat attendu** :
+
+```text
+Chain INPUT (policy DROP)
+ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0            ctstate RELATED,ESTABLISHED
+ACCEPT     tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:80
+ACCEPT     icmp --  0.0.0.0/0            0.0.0.0/0
+```
+
+### **3. Tester l’accès web**
+
+```bash
+echo "127.0.0.1 projet1.example.com" | sudo tee -a /etc/hosts
+curl http://projet1.example.com
+```
+
+**Résultat attendu** : Affiche le contenu de `index.html`.
+
+### **4. Tester le blocage des ports**
+
+```bash
+nc -zv 10.113.43.222 22   # Doit échouer (SSH bloqué)
+nc -zv 10.113.43.222 3306 # Doit échouer (MariaDB bloqué)
+nc -zv 10.113.43.222 80   # Doit réussir (HTTP autorisé)
+```
